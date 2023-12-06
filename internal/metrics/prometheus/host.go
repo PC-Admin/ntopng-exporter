@@ -5,6 +5,8 @@ import (
 	"github.com/aauren/ntopng-exporter/internal/ntopng"
 	"github.com/prometheus/client_golang/prometheus"
 	"strconv"
+	"time"
+	"fmt"
 )
 
 var (
@@ -30,9 +32,19 @@ type hostCollector struct {
 	totalDNSQueries   *prometheus.Desc
 	totalDNSReplies   *prometheus.Desc
 	totalServerFlows  *prometheus.Desc
+	bytesRcvdPerSec   *prometheus.Desc
+	bytesSentPerSec   *prometheus.Desc
+	scrapeInterval    time.Duration
+	prevBytesRcvd     map[string]float64
+	prevBytesSent     map[string]float64
 }
 
 func NewNtopNGHostCollector(ntopController *ntopng.Controller, config *config.Config) *hostCollector {
+	// Parse the scrape interval from the configuration
+	scrapeInterval, err := time.ParseDuration(config.Ntopng.ScrapeInterval)
+	if err != nil {
+		fmt.Printf("Error parsing scrape interval: %v\n", err)
+	}
 	return &hostCollector{
 		ntopNGController: ntopController,
 		config:           config,
@@ -101,6 +113,19 @@ func NewNtopNGHostCollector(ntopController *ntopng.Controller, config *config.Co
 			"total number of server flows for host",
 			hostLabels,
 			nil),
+		bytesRcvdPerSec: prometheus.NewDesc(
+			prometheus.BuildFQName("ntopng", "host", "bytes_received_per_second"),
+			"bytes received per second",
+			hostLabels,
+			nil),
+		bytesSentPerSec: prometheus.NewDesc(
+			prometheus.BuildFQName("ntopng", "host", "bytes_sent_per_second"),
+			"bytes sent per second",
+			hostLabels,
+			nil),
+		scrapeInterval:    scrapeInterval,
+		prevBytesRcvd:     make(map[string]float64),
+		prevBytesSent:     make(map[string]float64),
 	}
 }
 
@@ -116,6 +141,8 @@ func (c *hostCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.totalAlerts
 	ch <- c.totalClientFlows
 	ch <- c.totalServerFlows
+	ch <- c.bytesRcvdPerSec
+	ch <- c.bytesSentPerSec
 }
 
 func (c *hostCollector) Collect(ch chan<- prometheus.Metric) {
@@ -123,6 +150,22 @@ func (c *hostCollector) Collect(ch chan<- prometheus.Metric) {
 	defer c.ntopNGController.ListRWMutex.RUnlock()
 	for _, host := range c.ntopNGController.HostList {
 		var hostLabelValues = []string{host.IP, host.IfName, host.MAC, host.Name, strconv.Itoa(host.VLAN)}
+		hostIdentifier := host.IP // Define hostIdentifier, possibly use a combination of fields
+
+		// Calculate bytes received per second
+		prevReceived := c.prevBytesRcvd[hostIdentifier]
+		bytesRcvdPerSec := float64(host.BytesReceived - prevReceived) / c.scrapeInterval.Seconds()
+		c.prevBytesRcvd[hostIdentifier] = host.BytesReceived
+
+		// Calculate bytes sent per second
+		prevSent := c.prevBytesSent[hostIdentifier]
+		bytesSentPerSec := float64(host.BytesSent - prevSent) / c.scrapeInterval.Seconds()
+		c.prevBytesSent[hostIdentifier] = host.BytesSent
+
+		// Print the calculated variables
+		fmt.Printf("bytesRcvdPerSec, %f!\n", bytesRcvdPerSec)
+		fmt.Printf("bytesSentPerSec, %f!\n", bytesSentPerSec)
+
 		ch <- prometheus.MustNewConstMetric(c.activeClientFlows, prometheus.GaugeValue, host.ActiveFlowsAsClient,
 			hostLabelValues...)
 		ch <- prometheus.MustNewConstMetric(c.activeServerFlows, prometheus.GaugeValue, host.ActiveFlowsAsServer,
@@ -146,6 +189,9 @@ func (c *hostCollector) Collect(ch chan<- prometheus.Metric) {
 			hostLabelValues...)
 		ch <- prometheus.MustNewConstMetric(c.totalServerFlows, prometheus.CounterValue, host.TotalFlowsAsServer,
 			hostLabelValues...)
+		// New metrics for bytes received and sent per second
+		ch <- prometheus.MustNewConstMetric(c.bytesRcvdPerSec, prometheus.GaugeValue, bytesRcvdPerSec, hostLabelValues...)
+		ch <- prometheus.MustNewConstMetric(c.bytesSentPerSec, prometheus.GaugeValue, bytesSentPerSec, hostLabelValues...)
 	}
 }
 
